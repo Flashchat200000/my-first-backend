@@ -1,41 +1,49 @@
 import os
-from flask import Flask, request, render_template_string
+from flask import Flask, render_template_string
 from flask_sqlalchemy import SQLAlchemy
-from flask_socketio import SocketIO, emit # ДОБАВИЛИ
+from flask_socketio import SocketIO, emit
 
+# --- Инициализация ---
 app = Flask(__name__)
-# Настройки как и были
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL').replace("://", "ql://", 1) # ВАЖНЫЙ ФИКС ДЛЯ RENDER
+# ВАЖНЫЙ ФИКС ДЛЯ RENDER. ОН ЛОМАЕТСЯ БЕЗ ЭТОГО.
+db_url = os.environ.get('DATABASE_URL')
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+    
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['JSON_AS_ASCII'] = False
 
 db = SQLAlchemy(app)
-socketio = SocketIO(app) # ДОБАВИЛИ
+# async_mode='eventlet' важен для gunicorn
+socketio = SocketIO(app, async_mode='eventlet')
 
-# Модель как и была
+# --- Модель базы данных ---
 class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    text = db.Column(db.String(200), nullable=False)
+    text = db.Column(db.String(250), nullable=False)
 
-# Таблицу создаем так же
+# --- Создаем таблицы, если их нет ---
 with app.app_context():
     db.create_all()
 
-# HTML-шаблон. ВНИМАНИЕ: МЫ ЕГО СЕЙЧАС СИЛЬНО ИЗМЕНИМ
+# --- HTML-шаблон с JavaScript ---
 HTML_TEMPLATE = """
 <!doctype html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Флеш-чат 200000</title>
     <style>
-        body { font-family: sans-serif; background: #222; color: #eee; }
+        body { margin: 0; padding-bottom: 3rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #2c2f33; color: #ffffff; }
         #messages { list-style-type: none; margin: 0; padding: 0; }
-        #messages li { padding: 5px 10px; }
-        #messages li:nth-child(odd) { background: #333; }
-        #form { background: #444; padding: 10px; position: fixed; bottom: 0; width: 100%; }
-        #input { border: 1px solid #555; background: #222; color: #eee; padding: 10px; width: 80%; }
-        #form button { width: 18%; background: #0a0; border: none; padding: 10px; }
+        #messages li { padding: 0.5rem 1rem; }
+        #messages li:nth-child(odd) { background: #23272a; }
+        #form { background: rgba(0, 0, 0, 0.15); padding: 0.25rem; position: fixed; bottom: 0; left: 0; right: 0; display: flex; height: 3rem; box-sizing: border-box; backdrop-filter: blur(10px); }
+        #input { border: none; padding: 0 1rem; flex-grow: 1; border-radius: 2rem; margin: 0.25rem; background: #40444b; color: #ffffff; }
+        #input:focus { outline: none; }
+        #form button { background: #7289da; border: none; padding: 0 1rem; margin: 0.25rem; border-radius: 2rem; outline: none; color: #ffffff; }
     </style>
 </head>
 <body>
@@ -46,60 +54,69 @@ HTML_TEMPLATE = """
     </ul>
 
     <form id="form" action="">
-        <input id="input" autocomplete="off" /><button>Отправить</button>
+        <input id="input" autocomplete="off" placeholder="Введите сообщение..." /><button>Отправить</button>
     </form>
 
-    <!-- Подключаем клиент Socket.IO -->
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
-        // Устанавливаем соединение
-        const socket = io();
+        document.addEventListener('DOMContentLoaded', (event) => {
+            const socket = io();
 
-        const messages = document.getElementById('messages');
-        const form = document.getElementById('form');
-        const input = document.getElementById('input');
+            const messages = document.getElementById('messages');
+            const form = document.getElementById('form');
+            const input = document.getElementById('input');
 
-        // Отправляем сообщение на сервер
-        form.addEventListener('submit', function(e) {
-            e.preventDefault(); // чтобы страница не перезагружалась
-            if (input.value) {
-                socket.emit('send_message', { 'text': input.value });
-                input.value = '';
-            }
-        });
-
-        // Получаем сообщение от сервера и добавляем его в список
-        socket.on('new_message', function(msg) {
-            const item = document.createElement('li');
-            item.textContent = msg.text;
-            messages.appendChild(item);
+            // Скролл вниз при загрузке
             window.scrollTo(0, document.body.scrollHeight);
+
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                if (input.value) {
+                    socket.emit('send_message', { 'text': input.value });
+                    input.value = '';
+                }
+            });
+
+            socket.on('new_message', function(msg) {
+                const item = document.createElement('li');
+                item.textContent = msg.text;
+                messages.appendChild(item);
+                window.scrollTo(0, document.body.scrollHeight);
+            });
         });
     </script>
 </body>
 </html>
 """
 
-# Главная страница теперь просто отдает HTML с уже имеющимися сообщениями
+# --- Роуты и обработчики ---
+
 @app.route('/')
 def home():
-    messages = Message.query.order_by(Message.id).all()
+    # Просто отдаем страницу с последними 50 сообщениями
+    messages = Message.query.order_by(Message.id.desc()).limit(50).all()
+    messages.reverse() # чтобы новые были внизу
     return render_template_string(HTML_TEMPLATE, messages=messages)
 
-# Слушаем событие 'send_message' от клиента
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
 @socketio.on('send_message')
 def handle_send_message_event(data):
-    # Сохраняем сообщение в базу
-    new_msg = Message(text=data['text'])
-    db.session.add(new_msg)
-    db.session.commit()
-    # Отправляем НОВОЕ сообщение ВСЕМ подключенным клиентам
-    emit('new_message', {'text': new_msg.text}, broadcast=True)
+    if 'text' in data and data['text'].strip() != '':
+        print(f"Received message: {data['text']}")
+        # Сохраняем в базу
+        new_msg = Message(text=data['text'])
+        db.session.add(new_msg)
+        db.session.commit()
+        # Отправляем всем, включая отправителя
+        emit('new_message', {'text': new_msg.text}, broadcast=True)
 
-# Этот код больше не нужен, удаляем его нахуй:
-# @app.route('/add', methods=['POST']) ...
-# @app.route('/api/messages') ...
-
-# ЗАПУСКАТЬ ТЕПЕРЬ НУЖНО ТАК, ЧЕРЕЗ SOCKETIO
+# Этот блок для локального запуска, на Render он не используется
 if __name__ == '__main__':
-    socketio.run(app)
+    socketio.run(app, debug=True)
