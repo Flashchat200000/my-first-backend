@@ -3,3 +3,5 @@ gunicorn
 psycopg2-binary
 Flask-SQLAlchemy
 SQLAlchemy
+Flask-SocketIO
+eventlet
