@@ -5,3 +5,5 @@ Flask-SQLAlchemy
 SQLAlchemy
 Flask-SocketIO
 eventlet
+Flask-Login
+bcrypt
